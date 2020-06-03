@@ -1,0 +1,127 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+library(tidyverse); packageVersion("tidyverse")
+library(philr); packageVersion("philr")
+library(ape); packageVersion("ape")
+
+data(GlobalPatterns)
+
+```
+
+
+# From Phylr Docuumentation
+
+## Filter Low Abundance OTUs
+
+```{r}
+GP <-  filter_taxa(GlobalPatterns, function(x) sum(x > 3) > (0.2*length(x)), TRUE)
+GP <-  filter_taxa(GP, function(x) sd(x)/mean(x) > 3.0, TRUE)
+GP <- transform_sample_counts(GP, function(x) x+1)
+GP
+```
+
+## Process Phylogenetic Tree
+
+```{r}
+is.rooted(phy_tree(GP)) # Is the tree Rooted?
+is.binary.tree(phy_tree(GP)) # All multichotomies resolved?
+phy_tree(GP) <- makeNodeLabel(phy_tree(GP), method="number", prefix='n')
+name.balance(phy_tree(GP), tax_table(GP), 'n1')
+```
+
+## Investigate Dataset Components
+
+```{r}
+otu.table <- t(otu_table(GP))
+tree <- phy_tree(GP)
+metadata <- sample_data(GP)
+tax <- tax_table(GP)
+
+otu.table[1:2,1:2] # OTU Table
+```
+
+```{r}
+tree 
+```
+
+```{r}
+head(metadata,2) # Metadata
+```
+
+```{r}
+head(tax,2) # taxonomy table
+```
+
+## Transform data using PhILR
+
+```{r}
+gp.philr <- philr(otu.table, tree, 
+                  part.weights='enorm.x.gm.counts', 
+                  ilr.weights='blw.sqrt')
+```
+
+## Ordination
+```{r}
+gp.dist <- dist(gp.philr, method="euclidean")
+gp.pcoa <- ordinate(GP, 'PCoA', distance=gp.dist)
+plot_ordination(GP, gp.pcoa, color='SampleType') + geom_point(size=4)
+```
+
+# New Direciton
+The authors suggest using glmnet to do a lasoo to identify whihc variables
+best distinguis humans from non humans
+
+```{r}
+sample_data(GP)$human <- factor(get_variable(GP, "SampleType") %in% c("Feces", "Mock", "Skin", "Tongue"))
+```
+
+```{r}
+as(sample_data(GP), "data.frame")%>% select(SampleType) -> sam
+```
+
+```{r}
+merge(sam, gp.philr) -> gpsam
+gpsam %>%
+  mutate(SampleType = as.character(SampleType))  %>%
+  mutate(BroadType = if_else(SampleType %in% c("Feces", "Mock", "Skin", "Tongue"), "Human", 
+                             if_else(SampleType %in% c("Freshwater", "Ocean", "Freshwater (creek)"), "Water", "Other"))) %>%
+  select(BroadType, everything()) %>%
+  select(-SampleType) -> gpsam2
+```
+
+Now we have a data frame with all of the nodes, but also sample types. 
+
+Lets just focus on the first 50 nodes, to keep this managable.
+
+```{r}
+gpsam2 <- gpsam2 %>% select(BroadType, n1:n50)
+```
+
+We want to know if BroadType predicts each node
+
+```{r}
+# Make long format
+gpsamLong <- gpsam2 %>% pivot_longer(cols = n1:n50, names_to = "node", values_to = "ILR")
+# 
+gpsamNested <- gpsamLong %>% group_by(node) %>% nest()
+```
+
+Now we have a data frame, where one column is the nodes, and the other is a bunch of data frames for each node. Lets pull the data for the first node and model it.
+
+```{r}
+testNode1 <- gpsamNested %>% filter(node =="n1") %>% pull(data)
+testNode1
+```
+
+```{r}
+lm(ILR ~ BroadType, data = testNode1)
+```
+
+There was a problem with the merge, but this error especially still doesn't make sense.
+
+

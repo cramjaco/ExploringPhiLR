@@ -8,6 +8,7 @@ library(phyloseq); packageVersion("phyloseq")
 library(tidyverse); packageVersion("tidyverse")
 library(philr); packageVersion("philr")
 library(ape); packageVersion("ape")
+library(broom); packageVersion("broom")
 
 data(GlobalPatterns)
 
@@ -85,7 +86,11 @@ as(sample_data(GP), "data.frame")%>% select(SampleType) -> sam
 ```
 
 ```{r}
-merge(sam, gp.philr) -> gpsam
+# stick sam and gp.philr together
+# both have to have rownames turned into a column called rowname, 
+# gp.philr has to turn into a data frame
+inner_join(sam %>% rownames_to_column(),
+           gp.philr %>% as.data.frame() %>% rownames_to_column(), by = "rowname") -> gpsam
 gpsam %>%
   mutate(SampleType = as.character(SampleType))  %>%
   mutate(BroadType = if_else(SampleType %in% c("Feces", "Mock", "Skin", "Tongue"), "Human", 
@@ -114,14 +119,78 @@ gpsamNested <- gpsamLong %>% group_by(node) %>% nest()
 Now we have a data frame, where one column is the nodes, and the other is a bunch of data frames for each node. Lets pull the data for the first node and model it.
 
 ```{r}
-testNode1 <- gpsamNested %>% filter(node =="n1") %>% pull(data)
+testNode1 <- gpsamNested[[2]][[1]]
 testNode1
 ```
 
 ```{r}
-lm(ILR ~ BroadType, data = testNode1)
+lm(ILR ~ BroadType, data = testNode1) %>% tidy()
 ```
 
-There was a problem with the merge, but this error especially still doesn't make sense.
+So here's the linear model for node 1. Lets do the same linear model for every single node.
 
+First we need a function that does this work for us
+
+```{r}
+myLm <- function(df) {lm(ILR ~ BroadType, data = df) %>% tidy()}
+```
+
+Lets make sure the function works
+```{r}
+myLm(testNode1)
+```
+
+Now we apply myLm to every single nested data frame
+
+```{r}
+gpsamModeled <- gpsamNested %>% mutate(mod = map(data, myLm))
+head(gpsamModeled)
+```
+
+So now we have one column of nodes, one of data frames with ILR scores for that node vs each sample, and model results.
+
+All we have to do at this point is throw out the `data` column and concatenate all of the model results together.
+
+```{r}
+gpsamResults <- gpsamModeled %>%
+  # get rid of `data` column
+  select(-data) %>%
+  # stick everything together
+  unnest(mod) %>%
+  # make one more column which is the node number, as a number (makes graphing easier)
+  mutate(nodenum = parse_number(node)) %>%
+  mutate(fdr = p.adjust(`p.value`))
+
+gpsamResults
+```
+
+At this point we've done all of our analysis and can plot stuff.
+
+```{r}
+gpsamResults %>% ggplot(aes(x = nodenum, y = term, fill = `fdr`)) + geom_tile() +
+  scale_fill_viridis_c(trans = "log", direction = -1) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+gpsamResults2 <- gpsamResults %>%
+  mutate(fdrBinned = cut(fdr, breaks = c(0, 0.001, 0.01, 0.05, 0.2, 0.5, 1),
+                                        labels = c("< 0.001", "<0.01", "<0.05", "<0.2", "<0.5", ">0.5"),
+                        ordered_result = TRUE))
+```
+
+
+```{r}
+gpsamResults2 %>% ggplot(aes(x = nodenum, y = term, fill = fdrBinned)) + geom_tile() +
+  scale_fill_viridis_d(direction = -1) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Lots of good hits. Lets look at coefficients too.
+
+```{r}
+gpsamResults2 %>% ggplot(aes(x = nodenum, y = term, fill = estimate)) + geom_tile() +
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
 
